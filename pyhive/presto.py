@@ -7,15 +7,20 @@ Many docstrings in this file are based on the PEP, which is in the public domain
 
 from __future__ import absolute_import
 from __future__ import unicode_literals
+from builtins import object
 from pyhive import common
 from pyhive.common import DBAPITypeObject
 # Make all exceptions visible in this module per DB-API
-from pyhive.exc import *
+from pyhive.exc import *  # noqa
 import base64
 import getpass
 import logging
 import requests
-import urlparse
+
+try:  # Python 3
+    import urllib.parse as urlparse
+except ImportError:  # Python 2
+    import urlparse
 
 
 # PEP 249 module globals
@@ -123,9 +128,9 @@ class Cursor(common.DBAPICursor):
         section below.
         """
         # Sleep until we're done or we got the columns
-        self._fetch_while(lambda:
-            self._columns is None
-            and self._state not in (self._STATE_NONE, self._STATE_FINISHED)
+        self._fetch_while(
+            lambda: self._columns is None and
+            self._state not in (self._STATE_NONE, self._STATE_FINISHED)
         )
         if self._columns is None:
             return None
@@ -148,9 +153,10 @@ class Cursor(common.DBAPICursor):
         }
 
         if self._session_props:
-            headers['X-Presto-Session'] = ','.join([
-                "%s=%s" % (propname, propval)
-                for propname, propval in self._session_props.items()])
+            headers['X-Presto-Session'] = ','.join(
+                '{}={}'.format(propname, propval)
+                for propname, propval in self._session_props.items()
+            )
 
         # Prepare statement
         if parameters is None:
@@ -167,6 +173,21 @@ class Cursor(common.DBAPICursor):
         _logger.debug("Headers: %s", headers)
         response = requests.post(url, data=sql.encode('utf-8'), headers=headers)
         self._process_response(response)
+
+    def cancel(self):
+        if self._state == self._STATE_NONE:
+            raise ProgrammingError("No query yet")
+        if self._nextUri is None:
+            assert self._state == self._STATE_FINISHED, "Should be finished if nextUri is None"
+            return
+
+        response = requests.delete(self._nextUri)
+        if response.status_code != requests.codes.no_content:
+            fmt = "Unexpected status code after cancel {}\n{}"
+            raise OperationalError(fmt.format(response.status_code, response.content))
+
+        self._state = self._STATE_FINISHED
+        self._nextUri = None
 
     def poll(self):
         """Poll for and return the raw status data provided by the Presto REST API.
@@ -206,19 +227,23 @@ class Cursor(common.DBAPICursor):
         if response.status_code != requests.codes.ok:
             fmt = "Unexpected status code {}\n{}"
             raise OperationalError(fmt.format(response.status_code, response.content))
+
         response_json = response.json()
         _logger.debug("Got response %s", response_json)
         assert self._state == self._STATE_RUNNING, "Should be running if processing response"
         self._nextUri = response_json.get('nextUri')
         self._columns = response_json.get('columns')
+        if 'X-Presto-Clear-Session' in response.headers:
+            propname = response.headers['X-Presto-Clear-Session']
+            self._session_props.pop(propname, None)
         if 'X-Presto-Set-Session' in response.headers:
-            propname, propval = response.headers['X-Presto-Set-Session'].split('=',1)
+            propname, propval = response.headers['X-Presto-Set-Session'].split('=', 1)
             self._session_props[propname] = propval
         if 'data' in response_json:
             assert self._columns
             new_data = response_json['data']
             self._decode_binary(new_data)
-            self._data += new_data
+            self._data += map(tuple, new_data)
         if 'nextUri' not in response_json:
             self._state = self._STATE_FINISHED
         if 'error' in response_json:
