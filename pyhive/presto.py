@@ -50,6 +50,7 @@ class Connection(object):
     def __init__(self, *args, **kwargs):
         self._args = args
         self._kwargs = kwargs
+        kwargs.setdefault('session_props', {})
         if 'session_props' not in kwargs:
             kwargs['session_props'] = {}
 
